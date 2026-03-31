@@ -1,3 +1,7 @@
 Flask
 requests
 pycryptodome
+psutil
+playwright
+python-docx
+pdfplumber

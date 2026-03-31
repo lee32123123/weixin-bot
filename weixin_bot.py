@@ -1,46 +1,65 @@
 import subprocess
 import base64
+import hashlib
 import os
 import shlex
-from flask import Flask, request, jsonify
+import struct
+from flask import Flask, request, jsonify, make_response
 import requests
+from Crypto.Cipher import AES
 
 app = Flask(__name__)
 
-# 企业微信配置
 CORP_ID = 'lee'
 SECRET = 'W_jkwpEjBNhlOUmznS3VpUUqNGjmeu1UGbpkNy1CJ3s'
 AGENT_ID = '1000003'
+TOKEN = 'weixin123'
+ENCODING_AES_KEY = 'uHc5FhYOrGpWBijBa65fIAUwiBXCMrMufjiKME1uFT1'
 
-# 授权用户列表（只有这些用户ID可以执行命令）
 AUTHORIZED_USERS = {'李纯宇'}
+BLOCKED_COMMANDS = {'rm', 'mkfs', 'dd', 'shutdown', 'reboot', 'halt', 'poweroff', 'format', 'del', 'rd'}
 
-# 允许的命令前缀白名单（防止危险操作）
-BLOCKED_COMMANDS = {'rm', 'mkfs', 'dd', 'shutdown', 'reboot', 'halt', 'poweroff', 'format'}
 
+# ── 企业微信签名与解密 ──────────────────────────────
+
+def _verify_signature(msg_signature, timestamp, nonce, echostr):
+    items = sorted([TOKEN, timestamp, nonce, echostr])
+    sha1 = hashlib.sha1(''.join(items).encode('utf-8')).hexdigest()
+    return sha1 == msg_signature
+
+
+def _decrypt_echostr(encrypted):
+    aes_key = base64.b64decode(ENCODING_AES_KEY + '=')
+    cipher = AES.new(aes_key, AES.MODE_CBC, aes_key[:16])
+    decrypted = cipher.decrypt(base64.b64decode(encrypted))
+    # 去掉 PKCS7 padding
+    pad = decrypted[-1]
+    decrypted = decrypted[:-pad]
+    # 格式：16字节随机数 + 4字节消息长度 + 消息内容 + corpid
+    msg_len = struct.unpack('>I', decrypted[16:20])[0]
+    return decrypted[20:20 + msg_len].decode('utf-8')
+
+
+# ── 企业微信消息发送 ───────────────────────────────
 
 def get_access_token():
     url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={CORP_ID}&corpsecret={SECRET}"
-    response = requests.get(url)
-    return response.json().get('access_token')
+    return requests.get(url).json().get('access_token')
 
 
 def send_message(user_id, content, access_token=None):
-    """发送文本消息给指定用户"""
     if access_token is None:
         access_token = get_access_token()
     url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
-    payload = {
+    requests.post(url, json={
         "touser": user_id,
         "msgtype": "text",
         "agentid": AGENT_ID,
         "text": {"content": content}
-    }
-    requests.post(url, json=payload)
+    })
 
 
 def send_image(user_id, image_path, access_token=None):
-    """上传并发送图片给指定用户"""
     if access_token is None:
         access_token = get_access_token()
     upload_url = f"https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token={access_token}&type=image"
@@ -50,46 +69,38 @@ def send_image(user_id, image_path, access_token=None):
     if not media_id:
         send_message(user_id, "截图上传失败", access_token)
         return
-    url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
-    payload = {
-        "touser": user_id,
-        "msgtype": "image",
-        "agentid": AGENT_ID,
-        "image": {"media_id": media_id}
-    }
-    requests.post(url, json=payload)
+    requests.post(
+        f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}",
+        json={"touser": user_id, "msgtype": "image", "agentid": AGENT_ID, "image": {"media_id": media_id}}
+    )
 
+
+# ── 命令处理 ──────────────────────────────────────
 
 def is_command_allowed(cmd):
-    """检查命令是否在黑名单中"""
     try:
         parts = shlex.split(cmd)
     except ValueError:
         return False
     if not parts:
         return False
-    base_cmd = os.path.basename(parts[0])
+    base_cmd = os.path.basename(parts[0]).lower().replace('.exe', '')
     return base_cmd not in BLOCKED_COMMANDS
 
 
 def handle_run(user_id, cmd, access_token):
-    """执行 shell 命令并返回输出"""
     if not is_command_allowed(cmd):
         send_message(user_id, f"命令被拒绝（黑名单）: {cmd}", access_token)
         return
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30
+            cmd, shell=True, capture_output=True,
+            timeout=30, encoding='gbk', errors='replace'
         )
         output = result.stdout or result.stderr or "(无输出)"
-        # 截断过长输出
         if len(output) > 2000:
             output = output[:2000] + "\n...(输出已截断)"
-        send_message(user_id, f"$ {cmd}\n\n{output}", access_token)
+        send_message(user_id, f"> {cmd}\n\n{output}", access_token)
     except subprocess.TimeoutExpired:
         send_message(user_id, f"命令超时（>30s）: {cmd}", access_token)
     except Exception as e:
@@ -97,22 +108,22 @@ def handle_run(user_id, cmd, access_token):
 
 
 def handle_screenshot(user_id, access_token):
-    """截取当前桌面并发送"""
-    screenshot_path = "/tmp/weixin_screenshot.png"
+    screenshot_path = os.path.join(os.environ.get('TEMP', 'C:\\Temp'), 'weixin_screenshot.png')
     try:
-        # 优先使用 scrot，其次 gnome-screenshot，再次 import(ImageMagick)
-        for cmd in [
-            f"scrot {screenshot_path}",
-            f"gnome-screenshot -f {screenshot_path}",
-            f"import -window root {screenshot_path}",
-        ]:
-            result = subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
-            if result.returncode == 0 and os.path.exists(screenshot_path):
-                break
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+            "$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;"
+            "$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);"
+            "$g=[System.Drawing.Graphics]::FromImage($bmp);"
+            "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
+            f"$bmp.Save('{screenshot_path}');"
+            "$g.Dispose();$bmp.Dispose()"
+        )
+        result = subprocess.run(['powershell', '-Command', script], capture_output=True, timeout=15)
+        if result.returncode == 0 and os.path.exists(screenshot_path):
+            send_image(user_id, screenshot_path, access_token)
         else:
-            send_message(user_id, "截图失败：未找到可用截图工具（scrot/gnome-screenshot/imagemagick）", access_token)
-            return
-        send_image(user_id, screenshot_path, access_token)
+            send_message(user_id, "截图失败", access_token)
     except Exception as e:
         send_message(user_id, f"截图异常: {e}", access_token)
     finally:
@@ -121,19 +132,39 @@ def handle_screenshot(user_id, access_token):
 
 
 def handle_help(user_id, access_token):
-    help_text = (
+    send_message(user_id, (
         "手机控制电脑 - 可用命令：\n\n"
-        "/run <命令>   执行 shell 命令\n"
-        "  例：/run ls -la ~/Desktop\n\n"
+        "/run <命令>   执行命令\n"
+        "  例：/run dir C:\\Users\\PC\\Desktop\n\n"
         "/screenshot   截取当前桌面\n\n"
         "/help         显示此帮助"
-    )
-    send_message(user_id, help_text, access_token)
+    ), access_token)
+
+
+# ── 路由 ──────────────────────────────────────────
+
+@app.route('/callback', methods=['GET'])
+def verify():
+    """企业微信回调URL验证"""
+    msg_signature = request.args.get('msg_signature', '')
+    timestamp = request.args.get('timestamp', '')
+    nonce = request.args.get('nonce', '')
+    echostr = request.args.get('echostr', '')
+
+    if not _verify_signature(msg_signature, timestamp, nonce, echostr):
+        return make_response('invalid signature', 403)
+
+    try:
+        decrypted = _decrypt_echostr(echostr)
+        return make_response(decrypted, 200)
+    except Exception as e:
+        return make_response(f'decrypt failed: {e}', 500)
 
 
 @app.route('/callback', methods=['POST'])
 def callback():
-    data = request.json
+    """接收企业微信消息"""
+    data = request.json or {}
     user_id = data.get('FromUserName') or data.get('from_user', '')
     msg_type = data.get('MsgType') or data.get('msgtype', '')
 
@@ -142,47 +173,19 @@ def callback():
 
     text = (data.get('Content') or data.get('text', {}).get('content', '')).strip()
 
-    # 鉴权：只允许授权用户操作
     if user_id not in AUTHORIZED_USERS:
         return jsonify({"status": "unauthorized"})
 
     access_token = get_access_token()
 
     if text.startswith('/run '):
-        cmd = text[5:].strip()
-        handle_run(user_id, cmd, access_token)
+        handle_run(user_id, text[5:].strip(), access_token)
     elif text == '/screenshot':
         handle_screenshot(user_id, access_token)
     elif text == '/help':
         handle_help(user_id, access_token)
-    else:
-        # 保留原有省份转发逻辑
-        province = ""
-        if "广东" in text:
-            province = "guangdong"
-        elif "江苏" in text:
-            province = "jiangsu"
-        if province:
-            forward_to_group(data.get('group_id', ''), text, province, access_token)
 
     return jsonify({"status": "success"})
-
-
-def forward_to_group(group_id, message, province, access_token):
-    group_mapping = {
-        'guangdong': '广东群ID',
-        'jiangsu': '江苏群ID'
-    }
-    target_group_id = group_mapping.get(province)
-    if target_group_id:
-        url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
-        payload = {
-            "touser": target_group_id,
-            "msgtype": "text",
-            "agentid": AGENT_ID,
-            "text": {"content": message}
-        }
-        requests.post(url, json=payload)
 
 
 if __name__ == '__main__':

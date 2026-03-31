@@ -16,7 +16,7 @@ AGENT_ID = '1000003'
 TOKEN = 'weixin123'
 ENCODING_AES_KEY = 'sitCJVb3Z6dDYPORElvpQRZfVe8PyRZryVuj3Ujqn4l'
 
-AUTHORIZED_USERS = {'李纯宇'}
+AUTHORIZED_USERS = {'LiChunYu'}
 BLOCKED_COMMANDS = {'rm', 'mkfs', 'dd', 'shutdown', 'reboot', 'halt', 'poweroff', 'format', 'del', 'rd'}
 
 

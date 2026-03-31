@@ -14,7 +14,7 @@ CORP_ID = 'lee'
 SECRET = 'W_jkwpEjBNhlOUmznS3VpUUqNGjmeu1UGbpkNy1CJ3s'
 AGENT_ID = '1000003'
 TOKEN = 'weixin123'
-ENCODING_AES_KEY = 'uHc5FhYOrGpWBijBa65fIAUwiBXCMrMufjiKME1uFT1'
+ENCODING_AES_KEY = 'sitCJVb3Z6dDYPORElvpQRZfVe8PyRZryVuj3Ujqn4l'
 
 AUTHORIZED_USERS = {'李纯宇'}
 BLOCKED_COMMANDS = {'rm', 'mkfs', 'dd', 'shutdown', 'reboot', 'halt', 'poweroff', 'format', 'del', 'rd'}

@@ -13,7 +13,7 @@ SECRET = 'W_jkwpEjBNhlOUmznS3VpUUqNGjmeu1UGbpkNy1CJ3s'
 AGENT_ID = '1000003'
 
 # 授权用户列表（只有这些用户ID可以执行命令）
-AUTHORIZED_USERS = {'admin_user_id'}
+AUTHORIZED_USERS = {'李纯宇'}
 
 # 允许的命令前缀白名单（防止危险操作）
 BLOCKED_COMMANDS = {'rm', 'mkfs', 'dd', 'shutdown', 'reboot', 'halt', 'poweroff', 'format'}

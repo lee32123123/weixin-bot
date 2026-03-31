@@ -15,6 +15,8 @@ app = Flask(__name__)
 # ═══════════════════════════════════════════════════
 #  配置
 # ═══════════════════════════════════════════════════
+# AI 模式开关（True = 自然语言模式，False = 精确命令模式）
+ai_mode_users = set()   # 存储开启了 AI 模式的用户
 CORP_ID          = 'wwf70d6db10034246e'
 SECRET           = 'W_jkwpEjBNhlOUmznS3VpUUqNGjmeu1UGbpkNy1CJ3s'
 AGENT_ID         = '1000003'
@@ -91,8 +93,12 @@ def send_image(user_id, image_path, access_token=None):
 
 # ── /help ──────────────────────────────────────────
 def handle_help(user_id, access_token):
+    ai_status = "✅ 已开启" if user_id in ai_mode_users else "❌ 已关闭"
     send_message(user_id, (
         "═══ 手机控制电脑 ═══\n\n"
+        f"【AI 自然语言模式】{ai_status}\n"
+        "/ai on            开启（直接说人话）\n"
+        "/ai off           关闭（精确命令模式）\n\n"
         "【系统】\n"
         "/sysinfo          CPU/内存/磁盘信息\n"
         "/ip               查看本机IP\n"
@@ -397,6 +403,140 @@ def handle_claude_web(user_id, prompt, access_token):
             send_message(user_id, f"Claude 操作失败: {e}", access_token)
     threading.Thread(target=run, daemon=True).start()
 
+# ── AI 自然语言解析 ────────────────────────────────
+AI_SYSTEM_PROMPT = """你是一个智能电脑控制助手。用户用自然语言描述想做的事，你需要将其翻译成对应的系统命令。
+
+可用命令列表：
+/screenshot              截取桌面截图
+/sysinfo                 查看CPU/内存/磁盘信息
+/ip                      查看本机IP地址
+/lock                    锁定屏幕
+/shutdown                关机
+/restart                 重启电脑
+/sleep                   睡眠
+/tasklist                查看运行中的进程
+/kill <进程名>            结束某个进程，例: /kill notepad.exe
+/ls <路径>               列出目录文件，例: /ls C:\\Users\\PC\\Desktop
+/read <文件路径>          读取文本文件内容，例: /read C:\\Users\\PC\\Desktop\\notes.txt
+/run <cmd命令>           执行Windows命令，例: /run ipconfig
+/volume <0-100>          设置音量，例: /volume 50
+/mute                    切换静音
+/open <程序名或路径>      打开程序，例: /open notepad
+/clipboard               获取剪贴板内容
+/setclip <内容>          设置剪贴板内容
+/claude <问题>           向Claude提问
+/summarize <文件路径>    AI总结文档内容
+
+输出规则（严格遵守）：
+1. 每个要执行的命令单独一行，格式：EXEC: /命令
+2. 告知用户正在做什么，格式：REPLY: 消息内容
+3. 如果无法理解或需要更多信息，只输出：REPLY: 消息内容
+4. 可以一次输出多个 EXEC 行（顺序执行）
+5. 不要输出其他任何内容
+
+示例：
+用户: 帮我截个图看看桌面
+输出:
+REPLY: 正在截取桌面截图
+EXEC: /screenshot
+
+用户: 查一下电脑状态
+输出:
+REPLY: 正在获取系统信息
+EXEC: /sysinfo
+EXEC: /screenshot
+
+用户: 把音量调到30然后打开记事本
+输出:
+REPLY: 正在调节音量并打开记事本
+EXEC: /volume 30
+EXEC: /open notepad
+
+用户: 帮我总结桌面上的report.txt
+输出:
+REPLY: 正在读取并总结文档
+EXEC: /summarize C:\\Users\\PC\\Desktop\\report.txt
+"""
+
+def parse_ai_response(response_text):
+    """解析 AI 返回的结构化指令"""
+    execs = []
+    reply = None
+    for line in response_text.strip().splitlines():
+        line = line.strip()
+        if line.startswith('EXEC: '):
+            execs.append(line[6:].strip())
+        elif line.startswith('REPLY: '):
+            reply = line[7:].strip()
+    return execs, reply
+
+def ai_interpret_and_execute(user_id, user_text, access_token):
+    """用 Claude Web 理解自然语言，翻译并执行命令"""
+    send_message(user_id, "🤖 AI 理解中...", access_token)
+
+    prompt = f"{AI_SYSTEM_PROMPT}\n\n用户: {user_text}\n输出:"
+
+    def run():
+        try:
+            raw = ask_claude_web(prompt, timeout=60)
+            print(f"[AI解析] 原始回复: {raw[:200]}")
+            execs, reply = parse_ai_response(raw)
+
+            if reply:
+                send_message(user_id, reply, access_token)
+
+            if not execs:
+                if not reply:
+                    send_message(user_id, "AI 未能理解您的指令，请尝试更具体的描述", access_token)
+                return
+
+            # 依次执行每条命令
+            for cmd in execs:
+                print(f"[AI执行] {cmd}")
+                dispatch_command(user_id, cmd, access_token)
+
+        except Exception as e:
+            send_message(user_id, f"AI 解析失败: {e}", access_token)
+
+    threading.Thread(target=run, daemon=True).start()
+
+def dispatch_command(user_id, text, access_token):
+    """统一命令分发（供 AI 模式和直接命令共用）"""
+    if text == '/screenshot':
+        handle_screenshot(user_id, access_token)
+    elif text == '/sysinfo':
+        handle_sysinfo(user_id, access_token)
+    elif text == '/ip':
+        handle_ip(user_id, access_token)
+    elif text in ('/lock', '/shutdown', '/restart', '/sleep'):
+        handle_power(user_id, text[1:], access_token)
+    elif text == '/tasklist':
+        handle_tasklist(user_id, access_token)
+    elif text.startswith('/kill '):
+        handle_kill(user_id, text[6:].strip(), access_token)
+    elif text.startswith('/ls'):
+        handle_ls(user_id, text[3:].strip(), access_token)
+    elif text.startswith('/read '):
+        handle_read(user_id, text[6:].strip(), access_token)
+    elif text.startswith('/run '):
+        handle_run(user_id, text[5:].strip(), access_token)
+    elif text.startswith('/volume '):
+        handle_volume(user_id, text[8:].strip(), access_token)
+    elif text == '/mute':
+        handle_mute(user_id, access_token)
+    elif text.startswith('/open '):
+        handle_open(user_id, text[6:].strip(), access_token)
+    elif text == '/clipboard':
+        handle_clipboard_get(user_id, access_token)
+    elif text.startswith('/setclip '):
+        handle_clipboard_set(user_id, text[9:].strip(), access_token)
+    elif text.startswith('/claude '):
+        handle_claude_web(user_id, text[8:].strip(), access_token)
+    elif text.startswith('/summarize '):
+        handle_summarize(user_id, text[11:].strip(), access_token)
+    else:
+        send_message(user_id, f"未知命令: {text}", access_token)
+
 # ── /summarize (AI 总结文档) ───────────────────────
 def handle_summarize(user_id, file_path, access_token):
     if not os.path.exists(file_path):
@@ -491,6 +631,23 @@ def callback():
     access_token = get_access_token()
 
     # ── 命令路由 ──────────────────────────────────
+
+    # AI 模式开关
+    if text == '/ai on':
+        ai_mode_users.add(user_id)
+        send_message(user_id, "✅ AI 模式已开启\n现在可以用自然语言控制电脑，无需输入命令格式\n\n例：帮我截个图 / 查看系统状态 / 打开记事本", access_token)
+        return make_response('', 200)
+
+    if text == '/ai off':
+        ai_mode_users.discard(user_id)
+        send_message(user_id, "❌ AI 模式已关闭，恢复命令模式\n发送 /help 查看命令列表", access_token)
+        return make_response('', 200)
+
+    # 非 / 开头 且 AI 模式开启 → 自然语言解析
+    if not text.startswith('/') and user_id in ai_mode_users:
+        ai_interpret_and_execute(user_id, text, access_token)
+        return make_response('', 200)
+
     if text == '/help':
         handle_help(user_id, access_token)
 
